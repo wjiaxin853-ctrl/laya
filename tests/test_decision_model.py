@@ -56,27 +56,49 @@ def test_single_option_question_does_not_crash():
     assert torch.isfinite(act_logits).all()
 
 
-def test_single_option_top1_minus_top2_is_exactly_one():
-    # Softmax over a single valid logit is 1.0 regardless of its value, so the
-    # padded top2 (0.0) must make the act head's top1-top2 gap read as a fully
-    # decided 1.0 - the same signal it gets for any other unambiguous choice.
+def test_single_option_reaches_the_act_head_as_a_decided_choice():
+    # Softmax over a single valid logit is 1.0 regardless of its value, so the padded top2
+    # (0.0) must make the act head's top1-top2 gap read as a fully decided 1.0 - the same
+    # signal it gets for any other unambiguous choice.
+    #
+    # Assert on the features `forward` hands the act head, not on a softmax recomputed here:
+    # softmax over one element is identically 1.0, so a copy of the internals cannot fail no
+    # matter what forward does (#96's regression would have gone unnoticed).
     torch.manual_seed(1)
     model = _tiny_model()
-    input_ids, attention_mask, marker_pos, marker_mask, qtype = _inputs(
-        batch=1, seq=6, n_markers=1
-    )
-    with torch.no_grad():
-        h = model.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-        h = h + model.type_emb(qtype)[:, None, :]
-        pad = ~attention_mask.bool()
-        for layer in model.head.layers:
-            h = layer(h, src_key_padding_mask=pad)
-        idx = marker_pos.clamp(min=0)[:, :, None].expand(-1, -1, h.size(-1))
-        m = torch.gather(h, 1, idx)
-        logits = model.scorer(m).squeeze(-1).float()
-        logits = logits.masked_fill(~marker_mask, -1e4)
-        p = torch.softmax(logits.detach(), -1)
-    assert torch.allclose(p, torch.ones_like(p))
+    seen = {}
+
+    def recorder(_module, args, _output):
+        # forward hands the act head `cat([pooled, feats])`, so the four decision features
+        # (top1, top1 - top2, entropy, k/255) are its trailing columns.
+        seen["feats"] = args[0].detach()[..., -4:].clone()
+
+    handle = model.act_head.register_forward_hook(recorder)
+    try:
+        input_ids, attention_mask, marker_pos, marker_mask, qtype = _inputs(
+            batch=1, seq=6, n_markers=1
+        )
+        with torch.no_grad():
+            model(input_ids, attention_mask, marker_pos, marker_mask, qtype)
+        single = seen["feats"]
+
+        # The other way to ask for one valid option: two markers with the second masked out. Both
+        # must reach the act head with the same decided top1/gap, which is what forward's comment
+        # claims the pad buys.
+        input_ids, attention_mask, marker_pos, marker_mask, qtype = _inputs(
+            batch=1, seq=6, n_markers=2
+        )
+        marker_mask[:, 1] = False
+        with torch.no_grad():
+            model(input_ids, attention_mask, marker_pos, marker_mask, qtype)
+        masked = seen["feats"]
+    finally:
+        handle.remove()
+
+    assert single.shape == (1, 4)
+    assert torch.isfinite(single).all()
+    assert torch.allclose(single[:, :2], torch.ones_like(single[:, :2])), single[:, :2]
+    assert torch.allclose(single[:, :2], masked[:, :2], atol=1e-6), (single[:, :2], masked[:, :2])
 
 
 def test_multi_option_question_is_unaffected():
@@ -95,7 +117,7 @@ def test_multi_option_question_is_unaffected():
 
 if __name__ == "__main__":
     test_single_option_question_does_not_crash()
-    test_single_option_top1_minus_top2_is_exactly_one()
+    test_single_option_reaches_the_act_head_as_a_decided_choice()
     test_multi_option_question_is_unaffected()
     print("all decision model tests passed")
 
