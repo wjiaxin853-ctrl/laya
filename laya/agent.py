@@ -309,11 +309,12 @@ class Agent(HookRegistry):
         `fast=True` swaps the encoder/head forward for the TileLang fast path (CUDA only, needs
         `pip install laya[fast]`); see `Agent.accelerate`.
 
-        `compile=True` runs the model under `torch.compile` and turns ModernBERT's encoder
-        `reference_compile` on. `torch.compile` specializes per input shape and Laya sees a
-        new one on almost every request, so those graphs usually cost more than they return;
-        use it when the traffic is repetitive. `fast=True` takes precedence, because the
-        TileLang path replaces the forward that would be compiled.
+        `compile=True` runs the model under `torch.compile`; ModernBERT's own encoder compile
+        follows it on the devices that honour it, while CPU and MPS run the eager encoder, because
+        transformers refuses it there. `torch.compile` specializes per input shape and Laya sees a
+        new one on almost every request, so those graphs usually cost more than they return; use it
+        when the traffic is repetitive. `fast=True` takes precedence, because the TileLang path
+        replaces the forward that would be compiled.
 
         `subfolder` selects one checkpoint from a repo that bundles several, e.g.
         `Agent("convaiinnovations/laya", subfolder="multilingual")`. Only that subfolder is
@@ -430,11 +431,22 @@ class Agent(HookRegistry):
         # ModernBERT's reference_compile defaults to "auto" and will torch.compile the encoder.
         # That is a loss for the batch sizes Laya runs (a handful of questions per call) and can
         # hang on some platforms, so keep the eager path unless explicitly requested.
+        #
+        # Resolve the flag here instead of leaving "auto" for the encoder to resolve on its own:
+        # transformers <5 writes the outcome back onto its config inside its own forward
+        # (`_maybe_set_compile`), and under `compile=True` that write lands in the traced region,
+        # where it invalidates the guard and recompiles the whole graph -- the one-time cost
+        # laya/_compile.py exists to remove (#472). The two devices it writes for are CPU and MPS,
+        # where it refuses the encoder's compile in the same breath ("not supported ... falling
+        # back to non-compiled mode") and turns the flag off anyway; resolving it to False here
+        # costs nothing and keeps the trace clean. transformers >= 5 dropped the attribute and
+        # this is inert.
         try:
-            self.model.encoder.config.reference_compile = compile
+            refused = self.device.type in ("cpu", "mps")
+            self.model.encoder.config.reference_compile = bool(compile) and not refused
         except Exception:
             pass
-            
+
         # The TileLang fast path replaces the forward itself, so it takes precedence over compile.
         # dynamic=True plus independent dimensions (laya/_compile.py) so a new request shape
         # does not recompile.

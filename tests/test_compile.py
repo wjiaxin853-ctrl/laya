@@ -45,6 +45,11 @@ def batch(rows, tokens, markers):
 
 
 def compiled_agent(model):
+    # `Agent.__init__` resolves ModernBERT's own compile flag before wrapping (agent.py), and on
+    # CPU that resolution is False. A hand-built agent has to start from the same state: leaving
+    # the flag on "auto" lets the encoder write it inside the traced forward, and the recompile
+    # that follows is counted below as a second graph -- the very thing this file measures.
+    model.encoder.config.reference_compile = False
     agent = Agent.__new__(Agent)
     agent.device = torch.device("cpu")
     agent.dtype = torch.float32

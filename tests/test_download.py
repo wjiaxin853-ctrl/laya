@@ -295,7 +295,11 @@ class DownloadTests(unittest.TestCase):
         self.assertNotIsInstance(eager.model, OptimizedModule)
 
         compiled = load(str(self.repo), device="cpu", compile=True)
-        self.assertTrue(compiled.model.encoder.config.reference_compile)
+        # The encoder's own flag is resolved, not mirrored from `compile`: transformers refuses
+        # to compile the encoder on CPU (and would write that refusal into the config mid-graph
+        # if the loader left it on "auto"), so the wrapper below is what says compile=True was
+        # honoured.
+        self.assertFalse(compiled.model.encoder.config.reference_compile)
         self.assertIsInstance(compiled.model, OptimizedModule)
         self.assertIsInstance(compiled.model._orig_mod, DecisionModel)
 

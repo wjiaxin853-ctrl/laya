@@ -15,6 +15,12 @@ switches duck sizing off while a compiled forward runs, which removes the second
 of Laya's inputs is independent, so each gets its own symbol. What is left is torch's own 0/1
 specialisation, one extra graph the first time a single-row batch arrives.
 
+One more recompile comes from transformers <5 rather than from torch: `ModernBertModel.forward`
+runs `_maybe_set_compile()`, which resolves `reference_compile` by *writing it onto the config*
+during the first traced call. That write is a guard failure on the second call, so the graph is
+traced again. `Agent.__init__` resolves the flag before the model is wrapped, which keeps the
+count at one; see the comment there.
+
 `use_duck_shape` is read when a graph is traced, which happens lazily inside a call, so it cannot be
 set once at load and restored. It is set for the duration of each compiled forward instead. In older
 torch (2.11, for one) the setting is process-global, so it is put back to whatever it was when the
